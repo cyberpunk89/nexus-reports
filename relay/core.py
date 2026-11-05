@@ -20,8 +20,8 @@ KEYS = {'schema', 'client', 'kind', 'sig', 'version', 'edition', 'title', 'group
         'removed_lines', 'description', 'contact', 'mention_me', 'pow'}
 REQUIRED = ('schema', 'client', 'kind', 'version', 'edition', 'groups')
 MAX_BYTES = 96_000
-MAX_LINES = {'proton_log': 120}            # per group; everything else MAX_GROUP
-MAX_GROUP = 80
+MAX_LINES = {'proton_log': 150}            # per group; everything else MAX_GROUP
+MAX_GROUP = 150
 MAX_LINE = 400
 MAX_TITLE = 120
 _VERSION = re.compile(r'^\d{1,3}\.\d{1,3}(?:\.\d{1,3})?(?:[.+-][\w.]{1,20})?$')

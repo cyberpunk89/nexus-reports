@@ -136,7 +136,7 @@ class Schema(unittest.TestCase):
         self.bad(groups={'app': ['x'], 'evil': ['y']})
         self.bad(groups={'error': ['x']})                     # app is required
         self.bad(groups={'app': ['x' * 500]})
-        self.bad(groups={'app': ['x'] * 200})
+        self.bad(groups={'app': ['x'] * 400})
         self.bad(contact='not a user!')
         self.bad(client='0.5.3')                              # older than MIN_CLIENT
         self.bad(schema=2)
