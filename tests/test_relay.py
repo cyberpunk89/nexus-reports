@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import unittest
+from unittest import mock
 
 from relay import core
 from relay.github import verify_webhook
@@ -202,6 +203,16 @@ class Flow(unittest.TestCase):
         relay.report(raw(payload()), '3.3.3.3')
         self.assertEqual(len(gh.edits), 1)
         self.assertIn('Seen 3 times on 0.5.4, 0.5.5', gh.edits[0][2]['body'])
+
+    def test_count_survives_a_failed_edit(self):
+        from relay.github import GitHubError
+        relay, st, gh = make()
+        relay.report(raw(payload()), '1.1.1.1')
+        st.patch_age['3f9a0c1b2d4e'] = PATCH_EVERY + 1
+        gh.edit_issue = mock.Mock(side_effect=GitHubError('PATCH: HTTP 404'))
+        code, out = relay.report(raw(payload()), '2.2.2.2')
+        self.assertEqual((code, out['status']), (200, 'counted'))
+        self.assertEqual(st.sigs['3f9a0c1b2d4e']['count'], 2)
 
     def test_rate_limit_and_salt_rotation(self):
         relay, st, gh = make(PER_IP='2')

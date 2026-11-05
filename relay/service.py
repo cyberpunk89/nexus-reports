@@ -8,7 +8,9 @@
 import json
 
 from . import core
-from .github import verify_webhook
+import sys
+
+from .github import GitHubError, verify_webhook
 
 PER_IP = 6                      # reports per address per day
 GLOBAL = 300                    # reports per day, everyone
@@ -86,6 +88,14 @@ class Relay:
         self.store.sig_count(sig, rep['version'], rep['edition'])
         self.store.report_add(sig, rep, 'counted')
         known = self.store.sig_get(sig)
+        try:                    # the count is stored; a failed edit or comment must not
+            self._extras(rep, known)        # turn a counted report into an error
+        except GitHubError as e:
+            print(f"relay: count kept, issue not updated ({e})", file=sys.stderr)
+        return 200, {'status': 'counted', 'where': 'public' if known['public_issue'] else 'inbox',
+                     'issue': _url(self.cfg.public, known['public_issue'])}
+
+    def _extras(self, rep, known):
         if known['since_patch'] is None or known['since_patch'] >= PATCH_EVERY:
             self._refresh(known)
         if (rep['description'] or rep['contact']) and known['inbox_issue']:
@@ -96,8 +106,6 @@ class Relay:
             if rep['contact']:
                 lines.append(f"Contact: `{rep['contact']}` (inbox only)")
             self.gh.comment(self.cfg.inbox, known['inbox_issue'], '\n'.join(lines))
-        return 200, {'status': 'counted', 'where': 'public' if known['public_issue'] else 'inbox',
-                     'issue': _url(self.cfg.public, known['public_issue'])}
 
     def _refresh(self, known):
         """Rewrite the issue's seen-count line (throttled by PATCH_EVERY)."""
