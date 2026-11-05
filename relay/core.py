@@ -163,7 +163,8 @@ def safe_title(title: str) -> str:
     """Titles don't render markdown, but mentions and links in them still
     look like a call-out; break them."""
     t = _CTRL.sub('', title).replace('@', '@​').replace('://', ':​//')
-    return ('[Report] ' + t)[:MAX_TITLE + 9]
+    t = t if t.startswith('[') else '[Report] ' + t      # the app's titles have a tag
+    return t[:MAX_TITLE + 9]
 
 
 def seen_line(count: int, versions, editions) -> str:
