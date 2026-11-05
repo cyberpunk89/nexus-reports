@@ -4,3 +4,7 @@ CREATE INDEX IF NOT EXISTS reports_inbox ON reports (inbox_issue);
 CREATE TABLE IF NOT EXISTS sigs (sig text PRIMARY KEY, inbox_issue int, public_issue int, count int NOT NULL DEFAULT 1, versions text[] NOT NULL DEFAULT '{}', editions text[] NOT NULL DEFAULT '{}', last_patch timestamptz);
 CREATE TABLE IF NOT EXISTS rl (day date NOT NULL, key text NOT NULL, n int NOT NULL DEFAULT 0, PRIMARY KEY (day, key));
 CREATE TABLE IF NOT EXISTS salt (day date PRIMARY KEY, value text NOT NULL);
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS token_hash text;
+CREATE UNIQUE INDEX IF NOT EXISTS reports_token ON reports (token_hash);
+CREATE INDEX IF NOT EXISTS reports_public ON reports (public_issue);
+CREATE TABLE IF NOT EXISTS issues (number int PRIMARY KEY, state text NOT NULL DEFAULT 'open', fixed_in text, updated timestamptz NOT NULL DEFAULT now());

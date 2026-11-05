@@ -38,12 +38,16 @@ def app(environ, start_response):
     except ValueError:
         size = 0
     raw = environ['wsgi.input'].read(min(size, 200_000)) if size else b''
+    ip = (headers.get('x-real-ip') or (headers.get('x-forwarded-for') or '').split(',')[0]).strip()
     try:
         if route == 'status' and method == 'GET':
             code, out = _get().status()
         elif route == 'report' and method == 'POST':
-            ip = headers.get('x-real-ip') or (headers.get('x-forwarded-for') or '').split(',')[0]
-            code, out = _get().report(raw, ip.strip())
+            code, out = _get().report(raw, ip)
+        elif route == 'track' and method == 'POST':
+            code, out = _get().track(raw, ip)
+        elif route == 'similar' and method == 'POST':
+            code, out = _get().similar(raw, ip)
         elif route == 'github-webhook' and method == 'POST':
             code, out = _get().webhook(raw, headers)
         else:

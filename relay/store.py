@@ -1,5 +1,6 @@
 """Neon (Postgres) storage. Tables, created once (see schema.sql):
-reports (90 days), sigs, rl and salt (both cleared daily). No IP address
+reports (90 days), sigs, issues (public issues' open/closed state and
+fixed-in version), rl and salt (both cleared daily). No IP address
 and no raw request ever reaches a table."""
 
 import json
@@ -68,9 +69,36 @@ class Store:
             else:
                 self._one(f"UPDATE sigs SET {k} = %s WHERE sig = %s", v, sig)
 
-    def report_add(self, sig, rep: dict, state: str) -> int:
-        return self._one("INSERT INTO reports (sig, json, state) VALUES (%s, %s::jsonb, %s) "
-                         "RETURNING id", sig, json.dumps(rep), state)[0]
+    def report_add(self, sig, rep: dict, state: str, token_hash=None) -> int:
+        return self._one("INSERT INTO reports (sig, json, state, token_hash) "
+                         "VALUES (%s, %s::jsonb, %s, %s) RETURNING id",
+                         sig, json.dumps(rep), state, token_hash)[0]
+
+    def report_by_token(self, token_hash):
+        row = self._one("SELECT id FROM reports WHERE token_hash = %s", token_hash)
+        return self.report_get(row[0]) if row else None
+
+    def inbox_closed(self, number, closed: bool) -> None:
+        """The inbox issue was closed (or reopened) without a promotion: its
+        reports, and those counted on its signature, say so."""
+        frm, to = ("('held', 'counted')", 'closed') if closed else ("('closed')", 'held')
+        self._one(f"UPDATE reports SET state = %s WHERE state IN {frm} AND (inbox_issue = %s "
+                  "OR sig IN (SELECT sig FROM sigs WHERE inbox_issue = %s))", to, number, number)
+
+    def issue_known(self, number) -> bool:
+        return bool(self._one(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM issues WHERE number = %s) "
+            "OR EXISTS (SELECT 1 FROM sigs WHERE public_issue = %s) "
+            "OR EXISTS (SELECT 1 FROM reports WHERE public_issue = %s)", number, number, number))
+
+    def issue_get(self, number):
+        row = self._one("SELECT state, fixed_in FROM issues WHERE number = %s", number)
+        return {'state': row[0], 'fixed_in': row[1]} if row else None
+
+    def issue_set(self, number, state: str, fixed_in) -> None:
+        self._one("INSERT INTO issues (number, state, fixed_in) VALUES (%s, %s, %s) "
+                  "ON CONFLICT (number) DO UPDATE SET state = EXCLUDED.state, "
+                  "fixed_in = EXCLUDED.fixed_in, updated = now()", number, state, fixed_in)
 
     def report_set(self, rid, **fields) -> None:
         for k, v in fields.items():

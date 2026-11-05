@@ -14,7 +14,7 @@ from relay.service import PATCH_EVERY, Config, Relay
 class MemStore:
     def __init__(self):
         self.day, self.salts, self.rl, self.sigs, self.reports = 1, {}, {}, {}, {}
-        self.patch_age = {}
+        self.patch_age, self.issues = {}, {}
 
     def salt_today(self):
         if self.day not in self.salts:
@@ -51,11 +51,32 @@ class MemStore:
             self.patch_age[sig] = 0.0
         self.sigs[sig].update(f)
 
-    def report_add(self, sig, rep, state):
+    def report_add(self, sig, rep, state, token_hash=None):
         rid = len(self.reports) + 1
         self.reports[rid] = {'id': rid, 'sig': sig, 'json': json.loads(json.dumps(rep)),
-                             'inbox_issue': None, 'public_issue': None, 'state': state}
+                             'inbox_issue': None, 'public_issue': None, 'state': state,
+                             'token_hash': token_hash}
         return rid
+
+    def report_by_token(self, h):
+        return next((r for r in self.reports.values() if r['token_hash'] == h), None)
+
+    def inbox_closed(self, n, closed):
+        frm, to = (('held', 'counted'), 'closed') if closed else (('closed',), 'held')
+        sigs = {s['sig'] for s in self.sigs.values() if s['inbox_issue'] == n}
+        for r in self.reports.values():
+            if r['state'] in frm and (r['inbox_issue'] == n or r['sig'] in sigs):
+                r['state'] = to
+
+    def issue_known(self, n):
+        return (n in self.issues or any(s['public_issue'] == n for s in self.sigs.values())
+                or any(r['public_issue'] == n for r in self.reports.values()))
+
+    def issue_get(self, n):
+        return self.issues.get(n)
+
+    def issue_set(self, n, state, fixed_in):
+        self.issues[n] = {'state': state, 'fixed_in': fixed_in}
 
     def report_set(self, rid, **f):
         self.reports[rid].update(f)
@@ -294,6 +315,153 @@ class Flow(unittest.TestCase):
                       'repository': {'full_name': 'o/public'}, 'issue': {'number': 1}}):
             self.assertEqual(relay.webhook(*signed('issues', body))[1]['status'], 'ignored')
         self.assertEqual(len(gh.issues), 1)
+
+
+def promote_hook(n=1):
+    return signed('issues', {'action': 'labeled', 'label': {'name': 'promote'},
+                             'repository': {'full_name': 'o/inbox'}, 'issue': {'number': n}})
+
+
+def public_hook(action, n, state='closed', labels=()):
+    return signed('issues', {'action': action, 'repository': {'full_name': 'o/public'},
+                             'issue': {'number': n, 'state': state,
+                                       'labels': [{'name': x} for x in labels]}})
+
+
+def track(relay, *toks, ip='1.1.1.1'):
+    code, out = relay.track(raw({'tokens': list(toks)}), ip)
+    return code, out.get('reports', out)
+
+
+class Track(unittest.TestCase):
+    def test_report_returns_token_stores_hash(self):
+        relay, st, _ = make()
+        out = relay.report(raw(payload()), '1.1.1.1')[1]
+        tok = out['token']
+        self.assertGreaterEqual(len(tok), 30)
+        self.assertNotIn(tok, json.dumps(st.reports))
+        self.assertEqual(st.reports[1]['token_hash'], core.token_hash(tok))
+        again = relay.report(raw(payload()), '2.2.2.2')[1]
+        self.assertEqual(again['status'], 'counted')
+        self.assertNotEqual(again['token'], tok)
+
+    def test_held_says_waiting(self):
+        relay, _, _ = make()
+        tok = relay.report(raw(payload(contact='someone')), '1.1.1.1')[1]['token']
+        code, out = track(relay, tok)
+        self.assertEqual(code, 200)
+        self.assertEqual(out[tok], {'state': 'held', 'issue': None, 'url': None,
+                                    'fixed_in': None})
+
+    def test_only_coarse_keys(self):
+        relay, _, _ = make()
+        tok = relay.report(raw(payload(contact='someone')), '1.1.1.1')[1]['token']
+        relay.webhook(*promote_hook())
+        _, out = track(relay, tok)
+        self.assertEqual(set(out[tok]), set(core.TRACK_KEYS))
+        text = json.dumps(out)
+        for leak in ('someone', 'o/inbox', 'KeyError', 'count'):
+            self.assertNotIn(leak, text)
+
+    def test_counted_shows_shared_issue_and_fixed(self):
+        relay, _, _ = make()
+        first = relay.report(raw(payload()), '1.1.1.1')[1]['token']
+        second = relay.report(raw(payload()), '2.2.2.2')[1]['token']
+        relay.webhook(*promote_hook())
+        _, out = track(relay, first, second)
+        self.assertEqual(out[second]['issue'], 2)
+        self.assertEqual(out[second]['state'], 'open')
+        self.assertEqual(out[second]['url'], 'https://github.com/o/public/issues/2')
+        relay.webhook(*public_hook('labeled', 2, 'open', ['fixed-0.5.4']))
+        self.assertEqual(track(relay, second)[1][second]['state'], 'open')   # not closed yet
+        relay.webhook(*public_hook('closed', 2, 'closed', ['bug', 'fixed-0.5.4']))
+        _, out = track(relay, first, second)
+        for t in (first, second):
+            self.assertEqual((out[t]['state'], out[t]['fixed_in']), ('fixed', '0.5.4'))
+
+    def test_label_after_close_and_reopen(self):
+        relay, _, _ = make()
+        tok = relay.report(raw(payload()), '1.1.1.1')[1]['token']
+        relay.webhook(*promote_hook())
+        relay.webhook(*public_hook('closed', 2))
+        self.assertEqual(track(relay, tok)[1][tok]['state'], 'closed')
+        relay.webhook(*public_hook('labeled', 2, 'closed', ['fixed-0.5.10', 'fixed-0.5.9']))
+        self.assertEqual(track(relay, tok)[1][tok]['fixed_in'], '0.5.10')
+        relay.webhook(*public_hook('reopened', 2, 'open', ['fixed-0.5.10']))
+        self.assertEqual(track(relay, tok)[1][tok], {
+            'state': 'open', 'issue': 2, 'url': 'https://github.com/o/public/issues/2',
+            'fixed_in': None})
+
+    def test_bad_fixed_label_ignored(self):
+        self.assertIsNone(core.fixed_in([{'name': 'fixed-<script>'}, {'name': 'fixed'}]))
+        self.assertEqual(core.fixed_in(['fixed-1.0', {'name': 'fixed-0.9'}]), '1.0')
+
+    def test_unknown_issue_ignored(self):
+        relay, st, _ = make()
+        out = relay.webhook(*public_hook('closed', 77, labels=['fixed-1.0']))[1]
+        self.assertEqual(out['status'], 'ignored')
+        self.assertEqual(st.issues, {})
+
+    def test_inbox_closed_unpromoted(self):
+        relay, _, _ = make()
+        first = relay.report(raw(payload()), '1.1.1.1')[1]['token']
+        second = relay.report(raw(payload()), '2.2.2.2')[1]['token']
+        data, headers = signed('issues', {'action': 'closed',
+                                          'repository': {'full_name': 'o/inbox'},
+                                          'issue': {'number': 1, 'state': 'closed'}})
+        self.assertEqual(relay.webhook(data, headers)[1]['status'], 'tracked')
+        _, out = track(relay, first, second)
+        self.assertEqual({out[first]['state'], out[second]['state']}, {'closed'})
+        data, headers = signed('issues', {'action': 'reopened',
+                                          'repository': {'full_name': 'o/inbox'},
+                                          'issue': {'number': 1, 'state': 'open'}})
+        relay.webhook(data, headers)
+        self.assertEqual(track(relay, first)[1][first]['state'], 'held')
+
+    def test_promote_close_is_not_a_rejection(self):
+        relay, st, _ = make()
+        tok = relay.report(raw(payload()), '1.1.1.1')[1]['token']
+        relay.webhook(*promote_hook())
+        data, headers = signed('issues', {'action': 'closed',
+                                          'repository': {'full_name': 'o/inbox'},
+                                          'issue': {'number': 1, 'state': 'closed'}})
+        self.assertEqual(relay.webhook(data, headers)[1]['status'], 'ignored')
+        self.assertEqual(track(relay, tok)[1][tok]['state'], 'open')
+
+    def test_unknown_token_absent_and_schema(self):
+        relay, _, _ = make()
+        code, out = track(relay, 'x' * 32)
+        self.assertEqual((code, out), (200, {}))
+        self.assertEqual(relay.track(raw({'tokens': ['bad token!']}), '1.1.1.1')[0], 400)
+        self.assertEqual(relay.track(raw({'tokens': ['x' * 32] * 51}), '1.1.1.1')[0], 400)
+        self.assertEqual(relay.track(raw({'tokens': [], 'ip': 1}), '1.1.1.1')[0], 400)
+        self.assertEqual(relay.track(b'nope', '1.1.1.1')[0], 400)
+
+    def test_lookup_rate_limit(self):
+        from relay import service
+        relay, _, _ = make()
+        with mock.patch.object(service, 'LOOKUPS', 2):
+            for _ in range(2):
+                self.assertEqual(track(relay, 'x' * 32)[0], 200)
+            self.assertEqual(track(relay, 'x' * 32)[0], 429)
+            self.assertEqual(relay.similar(raw({'sig': 'abcdef'}), '1.1.1.1')[0], 429)
+            self.assertEqual(track(relay, 'x' * 32, ip='5.5.5.5')[0], 200)
+
+
+class Similar(unittest.TestCase):
+    def test_public_only(self):
+        relay, _, _ = make()
+        relay.report(raw(payload()), '1.1.1.1')
+        ask = raw({'sig': '3f9a0c1b2d4e'})
+        self.assertEqual(relay.similar(ask, '1.1.1.1'), (200, {'match': None}))   # held
+        relay.webhook(*promote_hook())
+        code, out = relay.similar(ask, '1.1.1.1')
+        self.assertEqual(out['match']['issue'], 2)
+        self.assertEqual(out['match']['state'], 'open')
+        relay.webhook(*public_hook('closed', 2, labels=['fixed-0.5.4']))
+        self.assertEqual(relay.similar(ask, '1.1.1.1')[1]['match']['fixed_in'], '0.5.4')
+        self.assertEqual(relay.similar(raw({'sig': 'abcdef'}), '1.1.1.1')[1], {'match': None})
+        self.assertEqual(relay.similar(raw({'sig': 'NOPE'}), '1.1.1.1')[0], 400)
 
 
 class Jwt(unittest.TestCase):

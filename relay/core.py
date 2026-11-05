@@ -8,6 +8,7 @@ optional GitHub username that stays in the private inbox."""
 
 import hashlib
 import re
+import secrets
 
 from . import render as _render
 from .scrub import scrub_lines
@@ -200,6 +201,74 @@ def body(rep: dict, seen: str | None = None, inbox: bool = False, report_id=None
     if report_id is not None:
         out += f"\n<!-- nexus-report:{int(report_id)} -->"
     return out[:65_000]
+
+
+# ---- tracking: tokens, fixed-in labels, a report's coarse state ------------
+
+_TOKEN = re.compile(r'^[A-Za-z0-9_-]{20,64}$')
+STATES = ('held', 'open', 'fixed', 'closed')
+TRACK_KEYS = ('state', 'issue', 'url', 'fixed_in')
+
+
+def new_token() -> str:
+    """Returned once to the sender; only its hash is stored."""
+    return secrets.token_urlsafe(24)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def tokens(payload) -> list:
+    """The tokens of a /v1/track body, checked, at most 50, or Rejected."""
+    if not isinstance(payload, dict) or set(payload) != {'tokens'}:
+        raise Rejected("expected {tokens: [...]}")
+    toks = payload['tokens']
+    if not isinstance(toks, list) or not 1 <= len(toks) <= 50:
+        raise Rejected("tokens: 1 to 50")
+    if not all(isinstance(t, str) and _TOKEN.match(t) for t in toks):
+        raise Rejected("tokens: not a token")
+    return list(dict.fromkeys(toks))
+
+
+def sig_of(payload) -> str:
+    """The signature of a /v1/similar body, or Rejected."""
+    if not isinstance(payload, dict) or set(payload) != {'sig'} \
+            or not isinstance(payload['sig'], str) or not _SIG.match(payload['sig']):
+        raise Rejected("expected {sig: <signature>}")
+    return payload['sig']
+
+
+def fixed_in(labels):
+    """The newest version named by a `fixed-<version>` label, else None.
+    Only a checked version comes back, never the label's own text."""
+    found = []
+    for lab in labels or ():
+        name = lab.get('name') if isinstance(lab, dict) else lab
+        if isinstance(name, str) and name.startswith('fixed-') and _VERSION.match(name[6:]):
+            found.append(name[6:])
+    return max(found, key=version_tuple) if found else None
+
+
+def issue_state(number, issue_row, public_repo: str) -> dict:
+    """A public issue as a sender may see it."""
+    st = (issue_row or {}).get('state') or 'open'
+    fix = (issue_row or {}).get('fixed_in')
+    state = 'open' if st != 'closed' else ('fixed' if fix else 'closed')
+    url = f"https://github.com/{public_repo}/issues/{int(number)}" if public_repo else None
+    return {'state': state, 'issue': int(number), 'url': url,
+            'fixed_in': fix if state == 'fixed' else None}
+
+
+def resolve(row: dict, sig_row, issue_row, public_repo: str) -> dict:
+    """What a sender may see about one report: a coarse state, and the public
+    issue once there is one (its own, or the one its signature counts on).
+    Never inbox numbers, text or counts."""
+    n = row.get('public_issue') or (sig_row or {}).get('public_issue')
+    if n:
+        return issue_state(n, issue_row, public_repo)
+    return {'state': 'closed' if row.get('state') == 'closed' else 'held',
+            'issue': None, 'url': None, 'fixed_in': None}
 
 
 # ---- rate limits -----------------------------------------------------------
