@@ -1,12 +1,14 @@
 """Neon (Postgres) storage. Tables, created once (see schema.sql):
 reports (90 days), sigs, issues (public issues' open/closed state and
-fixed-in version), rl and salt (both cleared daily). No IP address
-and no raw request ever reaches a table."""
+fixed-in version), rl and salt (both cleared daily), counts (the install
+count per day, 13 months) and counts_month (older days summed per month).
+No IP address and no raw request ever reaches a table."""
 
 import json
 import secrets
 
 KEEP_DAYS = 90
+COUNT_MONTHS = 13
 
 
 class Store:
@@ -30,9 +32,32 @@ class Store:
         self._one("DELETE FROM reports WHERE received_day < current_date - %s::int", KEEP_DAYS)
         self._one("UPDATE reports SET json = json - 'contact' - 'mention_me' "
                   "WHERE state = 'public' AND json ? 'contact'")
+        self.count_rollup()
         self._one("INSERT INTO salt (day, value) VALUES (current_date, %s) "
                   "ON CONFLICT (day) DO NOTHING", secrets.token_hex(32))
         return self._one("SELECT value FROM salt WHERE day = current_date")[0]
+
+    def count_add(self, rows) -> None:
+        """+1 on each (period, field, value) counter for today."""
+        if not rows:
+            return
+        p, f, v = (list(x) for x in zip(*rows))
+        self._one("INSERT INTO counts (day, period, field, value, n) "
+                  "SELECT current_date, p, f, v, 1 FROM unnest(%s::text[], %s::text[], "
+                  "%s::text[]) AS t(p, f, v) "
+                  "ON CONFLICT (day, period, field, value) DO UPDATE SET n = counts.n + 1",
+                  p, f, v)
+
+    def count_rollup(self) -> None:
+        """Whole months older than COUNT_MONTHS move into counts_month."""
+        cut = ("(date_trunc('month', current_date) - make_interval(months => %s::int))::date")
+        with self.db.transaction():
+            self._one("INSERT INTO counts_month (month, period, field, value, n) "
+                      "SELECT date_trunc('month', day)::date, period, field, value, sum(n) "
+                      f"FROM counts WHERE day < {cut} GROUP BY 1, 2, 3, 4 "
+                      "ON CONFLICT (month, period, field, value) "
+                      "DO UPDATE SET n = counts_month.n + EXCLUDED.n", COUNT_MONTHS)
+            self._one(f"DELETE FROM counts WHERE day < {cut}", COUNT_MONTHS)
 
     def hit(self, key: str) -> int:
         return self._one("INSERT INTO rl (day, key, n) VALUES (current_date, %s, 1) "

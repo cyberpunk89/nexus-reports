@@ -8,3 +8,5 @@ ALTER TABLE reports ADD COLUMN IF NOT EXISTS token_hash text;
 CREATE UNIQUE INDEX IF NOT EXISTS reports_token ON reports (token_hash);
 CREATE INDEX IF NOT EXISTS reports_public ON reports (public_issue);
 CREATE TABLE IF NOT EXISTS issues (number int PRIMARY KEY, state text NOT NULL DEFAULT 'open', fixed_in text, updated timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS counts (day date NOT NULL, period char(1) NOT NULL, field text NOT NULL, value text NOT NULL, n int NOT NULL DEFAULT 0, PRIMARY KEY (day, period, field, value));
+CREATE TABLE IF NOT EXISTS counts_month (month date NOT NULL, period char(1) NOT NULL, field text NOT NULL, value text NOT NULL, n bigint NOT NULL DEFAULT 0, PRIMARY KEY (month, period, field, value));

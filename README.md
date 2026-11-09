@@ -18,19 +18,33 @@ GitHub issue through a GitHub App (Issues only). No account is needed, and the a
   repo **without** the reporter's contact. On public issues the relay knows, closing, reopening
   and labelling keep `issues` current; a `fixed-<version>` label on a closed issue is the
   "fixed in" version. Closing an inbox issue without promoting it marks its reports closed.
-- `GET /v1/status`: `{mode, pow_bits, min_client, repo}`. `REPORTS_MODE` is `hold` (everything
+- `POST /v1/count`: the anonymous install count. The app sends it only if the user said yes,
+  at most once a UTC day: allow-listed fields (version, edition, install kind, OS id and major
+  version, desktop, session, language, Python minor, an age bucket) plus flags saying whether
+  this is its first ping of the day, ISO week and month. There is no id. The relay adds one to a
+  counter per field and period and keeps nothing else; unknown values count as `other`.
+  20 pings a day per address (salted, like reports), `COUNT_CAP` a day overall.
+- `GET /v1/status`: `{mode, pow_bits, min_client, repo, count}`. `REPORTS_MODE` is `hold` (everything
   to the inbox), `open` (clean signed crashes go public directly) or `off`.
 
 What is stored (Neon Postgres, `schema.sql`; changes in `migrations/`): the report JSON and
 the hash of its token for 90 days (the contact is deleted once a report is public),
 per-signature counts, each public issue's open/closed state and fixed-in version, and daily rate-limit counters keyed by
-a hash of the address with a random salt that is deleted every day. No IP address is stored.
+a hash of the address with a random salt that is deleted every day. For the install count,
+only per-day counters `(day, period, field, value, n)`: a ping is never stored as a row, so
+fields can't be joined back into one install (the one pair kept is edition with version).
+Days older than 13 months are summed into monthly counters. No IP address is stored.
+
+Reading the count: the views `v_active` (daily, weekly and monthly active installs) and
+`v_breakdown` (each field for the last full week and month, values under 5 folded into
+`other`), in the Neon console or with `python3 scripts/stats.py [days]`.
 
 `relay/render.py` and `relay/scrub.py` are copies of `nexus/report/render.py` and
 `nexus/report/scrub.py`, so the app's preview and the posted issue can't drift.
 
 Environment: `APP_ID`, `APP_PRIVATE_KEY`, `INSTALLATION_ID`, `WEBHOOK_SECRET`, `DATABASE_URL`,
 `INBOX_REPO`, `PUBLIC_REPO`, `REPORTS_MODE`, `DENY_LIST` (one regex per line; a hit keeps the
-report in the inbox), optional `MIN_CLIENT`, `PER_IP`, `GLOBAL_CAP`.
+report in the inbox), optional `MIN_CLIENT`, `PER_IP`, `GLOBAL_CAP`, and for the count `COUNT_MODE` (`on`/`off`),
+`COUNT_PER_IP`, `COUNT_CAP`, `LATEST_CLIENT` (a newer version counts as `dev`).
 
 Tests: `python3 -m unittest discover -s tests -t .`

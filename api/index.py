@@ -44,6 +44,8 @@ def app(environ, start_response):
             code, out = _get().status()
         elif route == 'report' and method == 'POST':
             code, out = _get().report(raw, ip)
+        elif route == 'count' and method == 'POST':
+            code, out = _get().count(raw, ip)
         elif route == 'track' and method == 'POST':
             code, out = _get().track(raw, ip)
         elif route == 'similar' and method == 'POST':

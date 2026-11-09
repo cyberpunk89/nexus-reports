@@ -6,7 +6,8 @@
     POST /v1/similar         {sig} -> the public issue with that signature
     POST /v1/github-webhook  `promote` on an inbox issue; open/closed and
                              fixed-<version> labels on public issues
-    GET  /v1/status          {mode, pow_bits, min_client, repo}
+    POST /v1/count           the anonymous install count (relay/stats.py)
+    GET  /v1/status          {mode, pow_bits, min_client, repo, count}
 
 Lookups are POSTs so tokens never land in request-path logs, and they are not
 under /v1/report*, which the firewall throttles hard.
@@ -14,7 +15,7 @@ under /v1/report*, which the firewall throttles hard.
 
 import json
 
-from . import core
+from . import core, stats
 import sys
 
 from .github import GitHubError, verify_webhook
@@ -24,6 +25,8 @@ GLOBAL = 300                    # reports per day, everyone
 PATCH_EVERY = 600               # seconds between body edits for a repeated crash
 LOOKUPS = 60                    # track/similar requests per address per day
 MODES = ('hold', 'open', 'off')
+COUNT_PER_IP = 20               # count pings per address per day (installs behind one NAT)
+COUNT_CAP = 20_000              # count pings per day, everyone
 
 
 class Config:
@@ -37,6 +40,10 @@ class Config:
         self.deny = core.deny_patterns(env.get('DENY_LIST', ''))
         self.per_ip = int(env.get('PER_IP') or PER_IP)
         self.global_cap = int(env.get('GLOBAL_CAP') or GLOBAL)
+        self.count_on = env.get('COUNT_MODE', 'on') != 'off'
+        self.count_per_ip = int(env.get('COUNT_PER_IP') or COUNT_PER_IP)
+        self.count_cap = int(env.get('COUNT_CAP') or COUNT_CAP)
+        self.latest = env.get('LATEST_CLIENT', '')
 
 
 def _url(repo, n):
@@ -50,7 +57,28 @@ class Relay:
     # ---- GET /v1/status ----------------------------------------------------
     def status(self):
         return 200, {'mode': self.cfg.mode, 'pow_bits': 0, 'min_client': self.cfg.min_client,
-                     'repo': self.cfg.public}
+                     'repo': self.cfg.public, 'count': self.cfg.count_on}
+
+    # ---- POST /v1/count ----------------------------------------------------
+    def count(self, raw: bytes, ip: str):
+        """One anonymous ping: +1 on each field's counter for each period
+        it flags. Nothing about the sender is kept."""
+        if not self.cfg.count_on:
+            return 503, {'error': 'off', 'reason': 'Counting is paused for now.'}
+        if len(raw) > stats.MAX_BYTES:
+            return 413, {'error': 'too-big'}
+        salt = self.store.salt_today()
+        if self.store.hit('count|' + core.rl_key(salt, ip or '?')) > self.cfg.count_per_ip:
+            return 429, {'error': 'limit', 'reason': 'Too many pings today from here.'}
+        if self.store.hit('count-global') > self.cfg.count_cap:
+            return 429, {'error': 'limit', 'reason': 'The relay is full for today.'}
+        try:
+            ping = stats.validate(json.loads(raw.decode('utf-8')), self.cfg.latest)
+        except (ValueError, UnicodeDecodeError) as e:
+            msg = str(e) if isinstance(e, core.Rejected) else 'not JSON'
+            return 400, {'error': 'schema', 'reason': msg}
+        self.store.count_add(stats.rows(ping))
+        return 200, {'status': 'counted'}
 
     # ---- POST /v1/report ---------------------------------------------------
     def report(self, raw: bytes, ip: str):
